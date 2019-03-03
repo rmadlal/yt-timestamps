@@ -1,9 +1,13 @@
 import argparse
 import requests
+from collections import namedtuple
 from datetime import timedelta
+from operator import attrgetter
 
 DISCOGS_SEARCH = 'https://api.discogs.com/database/search'
 TOKEN = 'hAzLxILnlVAkXByQddbJcvsaYnmjytIXnuxzfYHm'
+
+Track = namedtuple('Track', ['position', 'title', 'time'])  # time is first duration, then timestamp
 
 
 def str_to_timedelta(duration: str):
@@ -28,37 +32,40 @@ def get_tracklist_data(query):
     if not data['results']:
         return []
     data = get_or_empty(data['results'][0]['resource_url'])
-    tracklist = [track for track in data['tracklist'] if track['type_'] == 'track']
-    return tuple(zip(*((track['position'], str_to_timedelta(track['duration']), track['title'])
-                       for track in tracklist)))
+    return [Track(track['position'], track['title'], str_to_timedelta(track['duration']))
+            for track in data['tracklist'] if track['type_'] == 'track']
 
 
-def calculate_timestamps(durations):
-    timestamps = [timedelta()]
-    for duration in durations[:-1]:
-        timestamps.append(timestamps[-1] + duration)
-    return timestamps
+def durations_to_timestamps(tracklist):
+    new_tracklist = [tracklist[0]._replace(time=timedelta())]
+    for i in range(1, len(tracklist)):
+        timestamp = new_tracklist[i - 1].time + tracklist[i - 1].time
+        new_tracklist.append(tracklist[i]._replace(time=timestamp))
+    return new_tracklist
 
 
-def organize_lines(positions, timestamps, titles, prefix, separator, numbered):
-    return [(f'{prefix} ' if prefix else '') +
-            (f'{position}. ' if numbered else '') +
-            (f'{timestamp} {separator} {title}' if separator else f'{timestamp} {title}')
-            for position, timestamp, title in zip(positions, map(timedelta_to_str, timestamps), titles)]
+def organize_lines(tracklist, prefix, separator, numbered, ts_first):
+    return [(f'{prefix} ' if prefix else '')
+            + (f'{position}. ' if numbered else '')
+            + (timedelta_to_str(time) if ts_first else title)
+            + (f' {separator} ' if separator else ' ')
+            + (title if ts_first else timedelta_to_str(time))
+            for position, title, time in tracklist]
 
 
 def main():
     parser = argparse.ArgumentParser(description='Generate tracklist timestamps for YouTube video description')
     parser.add_argument('title', nargs='+', help='the (artist name and) album title')
     parser.add_argument('-n', '--numbered', action='store_true', help='display track numbers')
+    parser.add_argument('-tf', '--ts-first', action='store_true', help='timestamp before title')
     parser.add_argument('-p', '--prefix', help='beginning of line')
-    parser.add_argument('-s', '--separator', help='separator between timestamp and title')
+    parser.add_argument('-s', '--separator', help='separator between title and timestamp')
     args = parser.parse_args()
 
     query = ' '.join(args.title)
-    positions, durations, titles = get_tracklist_data(query)
-    timestamps = calculate_timestamps(durations)
-    lines = organize_lines(positions, timestamps, titles, args.prefix, args.separator, args.numbered)
+    tracklist = sorted(get_tracklist_data(query), key=attrgetter('position'))
+    tracklist = durations_to_timestamps(tracklist)
+    lines = organize_lines(tracklist, args.prefix, args.separator, args.numbered, args.ts_first)
 
     print('\n'.join(lines))
 

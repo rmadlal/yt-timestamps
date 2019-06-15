@@ -1,79 +1,122 @@
 import argparse
-import requests
 import logging
-import traceback
-from collections import namedtuple
+import requests
 from datetime import timedelta
-from functools import partial, reduce
-from operator import attrgetter
+from dataclasses import dataclass, astuple
+from functools import partial
 from typing import List
 
-
 DISCOGS_SEARCH = 'https://api.discogs.com/database/search'
-TOKEN = 'hAzLxILnlVAkXByQddbJcvsaYnmjytIXnuxzfYHm'
-DEBUG = False
+TOKEN = open('token.txt').read()
+DEBUG = 0
 
-Track = namedtuple('Track', ['position', 'title', 'time'])  # time is first duration, then timestamp
-
-logging.basicConfig(format='%(levelname)s\t%(funcName)s\t%(lineno)d\t%(message)s', level=logging.DEBUG)
+logging.basicConfig(format='%(asctime)s\t%(levelname)s\t%(filename)s\t%(lineno)d\t%(message)s', level=logging.DEBUG)
 
 
-def str_to_timedelta(duration: str) -> timedelta:
-    time_parts = list(map(int, duration.split(':')))
-    return timedelta(minutes=time_parts[0], seconds=time_parts[1])
+class Timestamp(object):
+    """ Wrapper on timedelta, for customized str conversions """
+
+    def __init__(self, *args, **kwargs):
+        self._td = timedelta(*args, **kwargs)
+
+    def __add__(self, other: 'Timestamp') -> 'Timestamp':
+        ts = Timestamp()
+        ts._td = self._td + other._td
+        return ts
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__qualname__}({repr(self._td)})'
+
+    def __str__(self) -> str:
+        minute = 60
+        hour = minute ** 2
+
+        remainder = int(self._td.total_seconds())
+        hours = remainder // hour
+        remainder %= hour
+        minutes = remainder // minute
+        remainder %= minute
+        seconds = remainder
+
+        if hours:
+            return f'{hours}:{minutes:02}:{seconds:02}'
+        return f'{minutes}:{seconds:02}'
+
+    @staticmethod
+    def from_str(duration: str) -> 'Timestamp':
+        parts = duration.split(':')
+        if not (duration and 0 < len(parts) <= 3):
+            raise ValueError(f'Invalid duration: "{duration}"')
+        if len(parts) == 3:
+            return Timestamp(hours=int(parts[0]), minutes=int(parts[1]), seconds=int(parts[2]))
+        if len(parts) == 2:
+            return Timestamp(minutes=int(parts[0]), seconds=int(parts[1]))
+        return Timestamp(seconds=int(parts[0]))
 
 
-def timedelta_to_str(td: timedelta) -> str:
-    s = str(td)
-    if s.startswith('0:'):
-        return ':'.join(s.split(':')[1:])
-    return s
+@dataclass
+class Track:
+    position: str
+    title: str
+    time: Timestamp
+
+    def __iter__(self):
+        """ Allows us to unpack (e.g: `position, title, time = track`) """
+        yield from astuple(self)
 
 
-def get_or_empty(url: str) -> dict:
-    try:
-        with requests.get(url) as response:
-            return response.json() if response.ok else {}
-    except requests.RequestException:
-        logging.error(traceback.format_exc())
-        return {}
+def httpget(url: str) -> dict:
+    return requests.get(url).json()
+
+
+def durations_to_timestamps(tracklist: List[Track]) -> None:
+    acc_durations = Timestamp()
+    for track in tracklist:
+        duration = track.time
+        track.time = acc_durations
+        acc_durations += duration
 
 
 def get_tracklist_data(query: str) -> List[Track]:
     try:
         if DEBUG > 1:
             import json
-            data = json.load(open('sample_timestamps.txt'))
+            tracklist = json.load(open('sample_tracklist.txt'))
         else:
-            data = get_or_empty(f'{DISCOGS_SEARCH}?q={query}&token={TOKEN}')
-            data = get_or_empty(data['results'][0]['resource_url'])
-        logging.debug(data)
-        return [Track(track['position'], track['title'], str_to_timedelta(track['duration']))
-                for track in data['tracklist'] if track['type_'] == 'track']
-    except (KeyError, ValueError, IndexError):
-        logging.error(traceback.format_exc())
+            results = httpget(f'{DISCOGS_SEARCH}?q={query}&type=release&token={TOKEN}')['results']
+            # release = next(filter(lambda result: result['type'] == 'release', results), {})
+            if not results:
+                logging.error(f'Album not found: "{query}"')
+                return []
+            release = results[0]
+            logging.info(f'Generating tracklist for "{release["title"]}"')
+            tracklist = httpget(release['resource_url'])['tracklist']
+
+        logging.debug(tracklist)
+        tracklist = [Track(track['position'], track['title'], Timestamp.from_str(track['duration']))
+                     for track in tracklist if track['type_'] == 'track']
+        durations_to_timestamps(tracklist)
+        return tracklist
+
+    except (KeyError, ValueError, IndexError, requests.RequestException):
+        logging.exception(f'Error getting tracklist for "{query}"')
         return []
 
 
-def durations_to_deltas(tracklist: List[Track]) -> List[Track]:
-    deltas = reduce(lambda acc, curr: acc + [acc[-1] + curr], map(attrgetter('time'), tracklist), [timedelta()])
-    logging.debug(deltas)
-    return [track._replace(time=timestamp) for track, timestamp in zip(tracklist, deltas)]
-
-
-def process_tracklist(tracklist: List[Track]) -> List[Track]:
-    tracklist = sorted(tracklist, key=attrgetter('position'))
-    tracklist = durations_to_deltas(tracklist)
-    logging.debug(tracklist)
-    return tracklist
-
-
 def format_lines(tracklist: List[Track], **args) -> List[str]:
-    return [(f'{args["prefix"]} ' if args["prefix"] else '')
-            + (f'{position}. ' if args["numbered"] else '')
-            + (timedelta_to_str(time) if args["ts_first"] else title)
-            + (f' {args["separator"]} ' if args["separator"] else ' ')
-            + (title if args["ts_first"] else timedelta_to_str(time))
+    def format_timestamp(timestamp: Timestamp):
+        open_parens = ('(', '[', '{', '<')
+        close_parens = (')', ']', '}', '>')
+        paren = args['parentheses']
+        if not paren:
+            return str(timestamp)
+        return f'{paren}{str(timestamp)}{close_parens[open_parens.index(paren)]}'
+
+    return [(f"{args['prefix']} " if args['prefix'] else '')
+            + (f'{position}. ' if args['numbered'] else '')
+            + (format_timestamp(time) if args['ts_first'] else title)
+            + (f" {args['separator']} " if args['separator'] else ' ')
+            + (title if args['ts_first'] else format_timestamp(time))
             for position, title, time in tracklist]
 
 
@@ -84,22 +127,21 @@ def main():
     parser.add_argument('query', metavar='title', help='the (artist name and) album title')
     parser.add_argument('-n', '--numbered', action='store_true', help='display track numbers')
     parser.add_argument('-tf', '--ts-first', action='store_true', help='timestamp before title')
-    parser.add_argument('-p', '--prefix', help='beginning of line')
+    parser.add_argument('-pr', '--prefix', help='beginning of line')
     parser.add_argument('-s', '--separator', help='separator between title and timestamp')
+    parser.add_argument('-pa', '--parentheses', choices=('(', '[', '{', '<'), help='surround timestamps with parentheses')
     parser.add_argument('-o', '--output', type=partial(open, mode='w'), default=None, help='output filename')
     parser.add_argument('-d', '--debug', action='count')
     args = parser.parse_args()
 
-    DEBUG = args.debug
+    DEBUG = args.debug or 0
     if not DEBUG:
         logging.disable(logging.DEBUG)
     logging.debug(args)
 
     tracklist = get_tracklist_data(args.query)
     if not tracklist:
-        print('Album not found')
         return
-    tracklist = process_tracklist(tracklist)
 
     print('\n'.join(format_lines(tracklist, **vars(args))), file=args.output)
 

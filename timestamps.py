@@ -4,11 +4,16 @@ import requests
 from datetime import timedelta
 from dataclasses import dataclass, astuple
 from functools import partial
-from typing import List
+from typing import List, Iterable
 
 DISCOGS_SEARCH = 'https://api.discogs.com/database/search'
 TOKEN = open('token.txt').read()
 DEBUG = 0
+
+MINUTE = 60
+HOUR = MINUTE ** 2
+OPEN_PARENS = ('(', '[', '{', '<')
+CLOSE_PARENS = (')', ']', '}', '>')
 
 logging.basicConfig(format='%(asctime)s\t%(levelname)s\t%(filename)s\t%(lineno)d\t%(message)s', level=logging.DEBUG)
 
@@ -25,22 +30,24 @@ class Timestamp(object):
         return ts
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__qualname__}({repr(self._td)})'
+        return f'Timestamp({repr(self._td)})'
 
     def __str__(self) -> str:
-        minute = 60
-        hour = minute ** 2
-
         remainder = int(self._td.total_seconds())
-        hours = remainder // hour
-        remainder %= hour
-        minutes = remainder // minute
-        remainder %= minute
+        hours = remainder // HOUR
+        remainder %= HOUR
+        minutes = remainder // MINUTE
+        remainder %= MINUTE
         seconds = remainder
 
         if hours:
             return f'{hours}:{minutes:02}:{seconds:02}'
         return f'{minutes}:{seconds:02}'
+
+    def format(self, paren: str = None) -> str:
+        if paren:
+            return f'{paren}{str(self)}{CLOSE_PARENS[OPEN_PARENS.index(paren)]}'
+        return str(self)
 
     @staticmethod
     def from_str(duration: str) -> 'Timestamp':
@@ -65,7 +72,7 @@ class Track:
         yield from astuple(self)
 
 
-def httpget(url: str) -> dict:
+def http_get_json(url: str) -> dict:
     return requests.get(url).json()
 
 
@@ -83,14 +90,13 @@ def get_tracklist_data(query: str) -> List[Track]:
             import json
             tracklist = json.load(open('sample_tracklist.txt'))
         else:
-            results = httpget(f'{DISCOGS_SEARCH}?q={query}&type=release&token={TOKEN}')['results']
-            # release = next(filter(lambda result: result['type'] == 'release', results), {})
+            results = http_get_json(f'{DISCOGS_SEARCH}?q={query}&type=release&token={TOKEN}')['results']
             if not results:
                 logging.error(f'Album not found: "{query}"')
                 return []
             release = results[0]
             logging.info(f'Generating tracklist for "{release["title"]}"')
-            tracklist = httpget(release['resource_url'])['tracklist']
+            tracklist = http_get_json(release['resource_url'])['tracklist']
 
         logging.debug(tracklist)
         tracklist = [Track(track['position'], track['title'], Timestamp.from_str(track['duration']))
@@ -103,21 +109,18 @@ def get_tracklist_data(query: str) -> List[Track]:
         return []
 
 
-def format_lines(tracklist: List[Track], **args) -> List[str]:
-    def format_timestamp(timestamp: Timestamp):
-        open_parens = ('(', '[', '{', '<')
-        close_parens = (')', ']', '}', '>')
-        paren = args['parentheses']
-        if not paren:
-            return str(timestamp)
-        return f'{paren}{str(timestamp)}{close_parens[open_parens.index(paren)]}'
-
-    return [(f"{args['prefix']} " if args['prefix'] else '')
-            + (f'{position}. ' if args['numbered'] else '')
-            + (format_timestamp(time) if args['ts_first'] else title)
-            + (f" {args['separator']} " if args['separator'] else ' ')
-            + (title if args['ts_first'] else format_timestamp(time))
-            for position, title, time in tracklist]
+def format_lines(tracklist: List[Track], args: argparse.Namespace) -> Iterable[str]:
+    prefix = f'{args.prefix} ' if args.prefix else ''
+    separator = f' {args.separator} ' if args.separator else ' '
+    for position, title, time in tracklist:
+        line = prefix
+        if args.numbered:
+            line += f'{position}. '
+        if args.title_first:
+            line += f'{title}{separator}{time.format(args.parentheses)}'
+        else:
+            line += f'{time.format(args.parentheses)}{separator}{title}'
+        yield line
 
 
 def main():
@@ -126,10 +129,10 @@ def main():
     parser = argparse.ArgumentParser(description='Generate tracklist timestamps for YouTube video description')
     parser.add_argument('query', metavar='title', help='the (artist name and) album title')
     parser.add_argument('-n', '--numbered', action='store_true', help='display track numbers')
-    parser.add_argument('-tf', '--ts-first', action='store_true', help='timestamp before title')
+    parser.add_argument('-tf', '--title-first', action='store_true', help='titles first')
     parser.add_argument('-pr', '--prefix', help='beginning of line')
     parser.add_argument('-s', '--separator', help='separator between title and timestamp')
-    parser.add_argument('-pa', '--parentheses', choices=('(', '[', '{', '<'), help='surround timestamps with parentheses')
+    parser.add_argument('-pa', '--parentheses', choices=OPEN_PARENS, help='surround timestamps with parentheses')
     parser.add_argument('-o', '--output', type=partial(open, mode='w'), default=None, help='output filename')
     parser.add_argument('-d', '--debug', action='count')
     args = parser.parse_args()
@@ -143,7 +146,7 @@ def main():
     if not tracklist:
         return
 
-    print('\n'.join(format_lines(tracklist, **vars(args))), file=args.output)
+    print('\n'.join(format_lines(tracklist, args)), file=args.output)
 
 
 if __name__ == '__main__':

@@ -10,8 +10,6 @@ DISCOGS_SEARCH = 'https://api.discogs.com/database/search'
 TOKEN = open('token.txt').read()
 DEBUG = 0
 
-MINUTE = 60
-HOUR = MINUTE ** 2
 OPEN_PARENS = ('(', '[', '{', '<')
 CLOSE_PARENS = (')', ']', '}', '>')
 
@@ -33,6 +31,9 @@ class Timestamp(object):
         return f'Timestamp({repr(self._td)})'
 
     def __str__(self) -> str:
+        MINUTE = 60
+        HOUR = 60 * MINUTE
+
         remainder = int(self._td.total_seconds())
         hours = remainder // HOUR
         remainder %= HOUR
@@ -46,7 +47,7 @@ class Timestamp(object):
 
     def format(self, paren: str = None) -> str:
         if paren:
-            return f'{paren}{str(self)}{CLOSE_PARENS[OPEN_PARENS.index(paren)]}'
+            return f'{paren}{self}{CLOSE_PARENS[OPEN_PARENS.index(paren)]}'
         return str(self)
 
     @staticmethod
@@ -129,7 +130,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate tracklist timestamps for YouTube video description')
     parser.add_argument('query', metavar='title', help='the (artist name and) album title')
     parser.add_argument('-n', '--numbered', action='store_true', help='display track numbers')
-    parser.add_argument('-tf', '--title-first', action='store_true', help='titles first')
+    parser.add_argument('-t', '--title-first', action='store_true', help='titles first')
     parser.add_argument('-pr', '--prefix', help='beginning of line')
     parser.add_argument('-s', '--separator', help='separator between title and timestamp')
     parser.add_argument('-pa', '--parentheses', choices=OPEN_PARENS, help='surround timestamps with parentheses')
